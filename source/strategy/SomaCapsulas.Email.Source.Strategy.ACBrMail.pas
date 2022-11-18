@@ -15,6 +15,7 @@ type
     function UrlDecode(AEncodedStr: string): string;
     function HexToInt(AHexStr: string): Int64;
     function GenerateUUID: string;
+    function PrepareUrlToDownload(AUrl: string): string;
     function DownloadAttachment(AUrlToDownload, AAttachmentDirectory, AAttachmentName: string): string;
     procedure CleanAttachment(AAttachmentTemporaryLocation: string);
   public
@@ -27,7 +28,7 @@ implementation
 
 uses
   SomaCapsulas.Email.Types, SomaCapsulas.Email.Exception, SomaCapsulas.Email.Message,
-  Winapi.Windows, Math, System.IOUtils;
+  Winapi.Windows, Math, System.IOUtils, System.RegularExpressions, System.StrUtils;
 
 { TEmailStrategyACBrMail }
 
@@ -79,7 +80,7 @@ begin
                                         LAttachmentExtension]);
   LDownloadedResult :=
     URLDownloadToFile(nil,
-                      PWideChar(AUrlToDownload),
+                      PWideChar(PrepareUrlToDownload(AUrlToDownload)),
                       PWideChar(LDestinationPath),
                       ZeroValue,
                       nil);
@@ -154,6 +155,14 @@ begin
   Result := RetVar;
 end;
 
+function TEmailStrategyACBrMail.PrepareUrlToDownload(AUrl: string): string;
+var
+  LNoCacheQueryParam: string;
+begin
+  LNoCacheQueryParam := AnsiLowerCase(StringReplace(GenerateUUID, '-', '', [rfReplaceAll]));
+  Result := TRegEx.Replace(AUrl, '\?.*',  '');
+  Result := Format('%s?t=%s', [Result, LNoCacheQueryParam]);
+end;
 
 procedure TEmailStrategyACBrMail.CleanAttachment(AAttachmentTemporaryLocation: string);
 begin
@@ -215,7 +224,7 @@ begin
       CleanAttachment(LAttachmentTemporaryLocation);
     end;
     if (TDirectory.Exists(LAttachmentTemporaryDirectory)) then
-      TDirectory.Delete(LAttachmentTemporaryDirectory);
+      TDirectory.Delete(LAttachmentTemporaryDirectory, True);
 
     Send(False);
   end;
