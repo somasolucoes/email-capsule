@@ -27,8 +27,18 @@ type
 implementation
 
 uses
-  SomaCapsulas.Email.Types, SomaCapsulas.Email.Exception, SomaCapsulas.Email.Message,
-  Winapi.Windows, Math, System.IOUtils, System.RegularExpressions, System.StrUtils;
+  SomaCapsulas.Email.Types,
+  SomaCapsulas.Email.Exception,
+  SomaCapsulas.Email.Message,
+  Winapi.Windows,
+  Winapi.ShlObj,
+  Winapi.ActiveX,
+  Math,
+  System.IOUtils,
+  System.RegularExpressions,
+  System.StrUtils,
+  IdHTTP,
+  IdSSLOpenSSL;
 
 { TEmailStrategyACBrMail }
 
@@ -53,40 +63,84 @@ end;
 
 function TEmailStrategyACBrMail.GetTempDirForAttachments: string;
 var
-  LBufDirWin: array[0..256] of Char;
-  LTempDir, LTempDirQMail: string;
+  LKnownFolderPathPointer: PWideChar;
+  LHandlerResult: HRESULT;
+  LAttachmentTemporaryDirectory, LUserTempFolder: string;
+const
+  FOLDER_ID_LOCALAPPDATA: TGUID = '{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}';
 begin
-  GetTempPath(256, LBufDirWin);
-  LTempDir := IncludeTrailingPathDelimiter(StrPas(LBufDirWin));
-  LTempDirQMail :=
-    IncludeTrailingPathDelimiter(Format('%s%s%s', [LTempDir,
-                                                   IncludeTrailingPathDelimiter('SOMA Gestão - QMail'),
-                                                   GenerateUUID]));
-  if not DirectoryExists(LTempDirQMail) then
-    ForceDirectories(LTempDirQMail);
-  Result := LTempDirQMail;
+  LUserTempFolder := GetEnvironmentVariable('TEMP');
+  if LUserTempFolder.IsEmpty then
+    LUserTempFolder := GetEnvironmentVariable('TMP');
+
+  if LUserTempFolder.IsEmpty then
+  begin
+    LKnownFolderPathPointer := nil;
+    LHandlerResult := SHGetKnownFolderPath(FOLDER_ID_LOCALAPPDATA,
+                                           ZeroValue,
+                                           ZeroValue,
+                                           LKnownFolderPathPointer);
+
+    if Succeeded(LHandlerResult) and (LKnownFolderPathPointer <> nil) then
+    begin
+      try
+        LUserTempFolder := TPath.Combine(string(LKnownFolderPathPointer), 'Temp');
+      finally
+        CoTaskMemFree(LKnownFolderPathPointer);
+      end;
+    end;
+  end;
+
+  if LUserTempFolder.IsEmpty then
+    LUserTempFolder := TPath.GetTempPath;
+
+  LAttachmentTemporaryDirectory :=
+    IncludeTrailingPathDelimiter(
+      TPath.Combine(LUserTempFolder, 'SOMA Gestão - QMail', GenerateUUID)
+    );
+
+  if not TDirectory.Exists(LAttachmentTemporaryDirectory) then
+    TDirectory.CreateDirectory(LAttachmentTemporaryDirectory);
+
+  Result := LAttachmentTemporaryDirectory;
 end;
 
 function TEmailStrategyACBrMail.DownloadAttachment(AUrlToDownload, AAttachmentDirectory,
   AAttachmentName: string): string;
 var
-  LAttachmentName, LAttachmentExtension, LDestinationPath: string;
-  LDownloadedResult: HRESULT;
+  LAttachmentName, LDestinationFilePath: string;
+  LHttpClient: TIdHTTP;
+  LSSLIOHandler: TIdSSLIOHandlerSocketOpenSSL;
+  LFileStream: TFileStream;
 begin
+  Result := EmptyStr;
   LAttachmentName := GetAttachmentNameByUrl(AUrlToDownload);
-  LAttachmentExtension := ExtractFileExt(AAttachmentName);
-  LDestinationPath := Format('%s%s%s', [AAttachmentDirectory,
-                                        TPath.GetFileNameWithoutExtension(AAttachmentName),
-                                        LAttachmentExtension]);
-  LDownloadedResult :=
-    URLDownloadToFile(nil,
-                      PWideChar(PrepareUrlToDownload(AUrlToDownload)),
-                      PWideChar(LDestinationPath),
-                      ZeroValue,
-                      nil);
-  if (LDownloadedResult <> S_OK) then
-    raise ESomaCapsulasEmail.Create(Format(E_SCE_0001, [AUrlToDownload, LDestinationPath]));
-  Result := LDestinationPath;
+  LDestinationFilePath := TPath.Combine(AAttachmentDirectory, AAttachmentName);
+
+  LHttpClient := nil;
+  LSSLIOHandler := nil;
+  LFileStream := nil;                                      
+  try
+    LHttpClient := TIdHTTP.Create(nil);
+
+    LSSLIOHandler := TIdSSLIOHandlerSocketOpenSSL.Create(LHttpClient);
+    LSSLIOHandler.SSLOptions.Method := sslvTLSv1_2;
+
+    LHttpClient.IOHandler := LSSLIOHandler;
+    LHttpClient.HandleRedirects := True;
+    LHttpClient.ConnectTimeout := 30000;
+    LHttpClient.ReadTimeout := 120000;
+    LHttpClient.Request.UserAgent := 'SOMA Gestão QMail';
+    LHttpClient.Request.Accept := '*/*';
+
+    LFileStream := TFileStream.Create(LDestinationFilePath, fmCreate);
+    LHttpClient.Get(AUrlToDownload, LFileStream);
+
+    Result := LDestinationFilePath;
+  finally
+    LHttpClient.Free;
+    LFileStream.Free;
+  end;
 end;
 
 function TEmailStrategyACBrMail.GetAttachmentNameByUrl(AUrl,
